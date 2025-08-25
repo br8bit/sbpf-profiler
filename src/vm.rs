@@ -21,13 +21,13 @@ use crate::{
     program::{BuiltinFunction, BuiltinProgram, FunctionRegistry, SBPFVersion},
     static_analysis::Analysis,
 };
-use std::{cell::RefCell, collections::BTreeMap, fmt::Debug};
+use std::{collections::BTreeMap, fmt::Debug};
 use {
     crate::profiler,
     bs58,
     std::{
         env,
-        fs::{File, OpenOptions},
+        fs::OpenOptions,
         io::{BufWriter, Write},
         path::{Path, PathBuf},
     },
@@ -39,30 +39,12 @@ use {
     std::sync::Arc,
 };
 
+use crate::profiling::PROFILING_STATE;
 #[cfg(feature = "shuttle-test")]
 use shuttle::{
     rand::{thread_rng, Rng},
     sync::Arc,
 };
-
-pub(crate) struct ProfilingState {
-    pub(crate) writer: Option<BufWriter<File>>,
-    pub(crate) trace_path: Option<PathBuf>,
-    pub(crate) root_program_path: Option<PathBuf>,
-    pub(crate) next_program_id: Option<[u8; 32]>,
-    pub(crate) nesting_level: u32,
-}
-
-thread_local! {
-    pub(crate) static PROFILING_STATE: RefCell<ProfilingState> = const { RefCell::new(ProfilingState {
-        writer: None,
-        trace_path: None,
-        root_program_path: None,
-        next_program_id: None,
-        nesting_level: 0,
-    })
-    };
-}
 
 /// Shift the RUNTIME_ENVIRONMENT_KEY by this many bits to the LSB
 ///
@@ -271,10 +253,6 @@ impl ProfilerGuard {
                             state.writer = Some(BufWriter::new(file));
                             state.trace_path = Some(trace_path.clone());
                             state.root_program_path = Some(root_program_path);
-                            println!(
-                                "[SBPF Profiler] Enabled. Writing raw trace to: {:?}",
-                                trace_path
-                            );
                         }
                         Err(e) => {
                             eprintln!(
@@ -490,13 +468,8 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
                     .map(|id| bs58::encode(id).into_string())
                     .unwrap_or_else(|| "ROOT_PLACEHOLDER".to_string());
 
-                if let Some(mut writer) = state.writer.take() {
-                    if writeln!(writer, "VM_START:{}", program_id_str).is_ok() {
-                        state.writer = Some(writer);
-                    } else {
-                        eprintln!("[SBPF Profiler] Error writing to trace file, disabling.");
-                    }
-                }
+                let is_symbolizable = state.is_program_symbolizable(&program_id_str);
+                state.symbolizable_stack.push(is_symbolizable);
             }
         });
 
@@ -548,12 +521,7 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
 
         PROFILING_STATE.with(|state_cell| {
             if let Ok(mut state) = state_cell.try_borrow_mut() {
-                if let Some(writer) = &mut state.writer {
-                    if let Err(e) = writeln!(writer, "VM_END") {
-                        eprintln!("[SBPF Profiler] Error writing to trace file: {}", e);
-                        state.writer = None;
-                    }
-                }
+                state.symbolizable_stack.pop();
             }
         });
 
